@@ -40,17 +40,60 @@ HuggingFace on first run, after which it is fully offline).
 
 - **(Optional) Ollama** — only if you select the Ollama embedding backend.
 
-## Build
+## Installation
+
+### 1. Install a C compiler
+
+CGO needs a C toolchain on `PATH` (for tree-sitter).
+
+**Windows** — install WinLibs (MinGW-w64) via winget:
 
 ```bash
+winget install --id BrechtSanders.WinLibs.POSIX.UCRT
+```
+
+winget does not add it to `PATH` automatically. Add the package's `mingw64\bin`
+directory to `PATH` (it lives under
+`%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.*\mingw64\bin`),
+or use MSYS2 / TDM-GCC instead.
+
+**macOS** — install the Xcode command-line tools:
+
+```bash
+xcode-select --install
+```
+
+**Linux (Debian/Ubuntu)** — install the build toolchain:
+
+```bash
+sudo apt-get install build-essential
+```
+
+Verify the compiler is visible:
+
+```bash
+gcc --version
+```
+
+### 2. Clone and build
+
+```bash
+git clone https://github.com/vaughanb/agent-context-go.git
+cd agent-context-go
 CGO_ENABLED=1 go build -o agent-context-go ./cmd/agent-context-go
 ```
 
 On Windows (PowerShell):
 
 ```powershell
+git clone https://github.com/vaughanb/agent-context-go.git
+cd agent-context-go
 $env:CGO_ENABLED=1; go build -o agent-context-go.exe ./cmd/agent-context-go
 ```
+
+This produces a single self-contained binary. Note the full path to it — you'll
+pass it to `claude mcp add` below. On first use the server downloads the
+embedding model (~90 MB) into `CCG_MODEL_DIR`; after that it runs fully offline.
 
 ## Configuration
 
