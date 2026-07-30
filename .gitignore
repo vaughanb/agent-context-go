@@ -1,12 +1,12 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
 # Binaries for programs and plugins
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# The built server binary (no extension on Unix)
+/agent-context-go
 
 # Test binary, built with `go test -c`
 *.test
@@ -27,6 +27,11 @@ go.work.sum
 # env file
 .env
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Local index / model caches (also live under ~/.claude-context-go)
+/index/
+/models/
+
+# Editor/IDE / OS
+.idea/
+.vscode/
+.DS_Store

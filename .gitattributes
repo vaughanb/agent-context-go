@@ -1,0 +1,7 @@
+# Normalize line endings: store text as LF in the repo.
+* text=auto eol=lf
+
+# Go tooling requires LF.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
