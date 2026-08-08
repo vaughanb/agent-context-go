@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/config"
+	"github.com/vaughanb/agent-context-go/internal/config"
 )
 
 // Embedder produces embeddings for text. Implementations discover their own

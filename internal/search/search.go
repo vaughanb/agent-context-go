@@ -10,7 +10,7 @@ import (
 	"math"
 	"sort"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/core"
+	"github.com/vaughanb/agent-context-go/internal/core"
 )
 
 // Store supplies the two retrieval channels search fuses. It is a narrow view

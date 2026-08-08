@@ -17,7 +17,7 @@ import (
 	"os"
 	"sync"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/core"
+	"github.com/vaughanb/agent-context-go/internal/core"
 )
 
 // Chunker splits a file's bytes into searchable chunks. It mirrors

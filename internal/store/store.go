@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/core"
+	"github.com/vaughanb/agent-context-go/internal/core"
 
 	_ "modernc.org/sqlite"
 )

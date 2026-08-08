@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/chunker"
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/config"
+	"github.com/vaughanb/agent-context-go/internal/chunker"
+	"github.com/vaughanb/agent-context-go/internal/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

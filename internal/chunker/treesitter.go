@@ -7,7 +7,7 @@ import (
 	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
 	tree_sitter_typescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/core"
+	"github.com/vaughanb/agent-context-go/internal/core"
 )
 
 // language binds a tree-sitter grammar to the metadata the chunker needs.

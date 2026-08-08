@@ -7,7 +7,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/indexer"
+	"github.com/vaughanb/agent-context-go/internal/indexer"
 )
 
 // defaultTopN is the number of results returned by search_code when the caller

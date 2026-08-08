@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/core"
+	"github.com/vaughanb/agent-context-go/internal/core"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

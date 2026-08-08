@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/core"
+	"github.com/vaughanb/agent-context-go/internal/core"
 )
 
 // Chunker splits a source file's bytes into chunks. path informs language

@@ -15,11 +15,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/config"
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/embed"
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/indexer"
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/search"
-	"gitlab.com/brenden.vaughan/claude-context-go/internal/store"
+	"github.com/vaughanb/agent-context-go/internal/config"
+	"github.com/vaughanb/agent-context-go/internal/embed"
+	"github.com/vaughanb/agent-context-go/internal/indexer"
+	"github.com/vaughanb/agent-context-go/internal/search"
+	"github.com/vaughanb/agent-context-go/internal/store"
 )
 
 // Chunker is the chunking dependency the indexer needs. It is injected so this

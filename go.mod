@@ -1,4 +1,4 @@
-module gitlab.com/brenden.vaughan/claude-context-go
+module github.com/vaughanb/agent-context-go
 
 go 1.26
 

@@ -27,73 +27,62 @@ HuggingFace on first run, after which it is fully offline).
 | `get_indexing_status` | Poll indexing progress (phase, files done/total, errors)      |
 | `clear_index`         | Empty a codebase's index                                      |
 
-## Requirements
+## Install
 
-- **Go 1.26+**
-- **A C compiler + CGO** — the tree-sitter chunker uses CGO. On Windows install
-  [mingw-w64](https://www.mingw-w64.org/) (e.g. via `winget install --id BrechtSanders.WinLibs.POSIX.UCRT`),
-  MSYS2, or TDM-GCC, and ensure `gcc` is on `PATH`. On macOS install the Xcode
-  command-line tools; on Linux install `gcc`/`build-essential`.
+### Quick install (recommended)
 
-  > Embeddings do **not** need a native ONNX Runtime: hugot's pure-Go backend
-  > runs the model in-process. CGO is required only for tree-sitter.
+One command downloads a prebuilt binary and registers it into every supported
+AI coding agent it detects — no Go toolchain or C compiler required.
 
-- **(Optional) Ollama** — only if you select the Ollama embedding backend.
-
-## Installation
-
-### 1. Install a C compiler
-
-CGO needs a C toolchain on `PATH` (for tree-sitter).
-
-**Windows** — install WinLibs (MinGW-w64) via winget:
+**macOS / Linux**
 
 ```bash
-winget install --id BrechtSanders.WinLibs.POSIX.UCRT
+curl -fsSL https://raw.githubusercontent.com/vaughanb/agent-context-go/main/install.sh | sh
 ```
 
-winget does not add it to `PATH` automatically. Add the package's `mingw64\bin`
-directory to `PATH` (it lives under
-`%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.*\mingw64\bin`),
-or use MSYS2 / TDM-GCC instead.
+**Windows (PowerShell)**
 
-**macOS** — install the Xcode command-line tools:
+```powershell
+irm https://raw.githubusercontent.com/vaughanb/agent-context-go/main/install.ps1 | iex
+```
+
+Then restart your agent(s) (see [Configure your agents](#configure-your-agents))
+and start searching. On first use the server downloads the ~90 MB embedding
+model into `CCG_MODEL_DIR`, after which it runs fully offline.
+
+### With Go
+
+With Go 1.26+ and a C compiler on `PATH` (see below):
 
 ```bash
-xcode-select --install
+go install github.com/vaughanb/agent-context-go/cmd/agent-context-go@latest
+agent-context-go install
 ```
 
-**Linux (Debian/Ubuntu)** — install the build toolchain:
+### Build from source
 
-```bash
-sudo apt-get install build-essential
-```
+Building yourself needs **Go 1.26+** and a **C compiler** (CGO is used by the
+tree-sitter chunker). Embeddings do *not* need a native ONNX Runtime — hugot's
+pure-Go backend runs the model in-process; CGO is required only for tree-sitter.
+Ollama is optional, only for the Ollama embedding backend.
 
-Verify the compiler is visible:
+Install a C compiler:
 
-```bash
-gcc --version
-```
+- **Windows** — `winget install --id BrechtSanders.WinLibs.POSIX.UCRT` (WinLibs /
+  MinGW-w64), then add its `mingw64\bin` to `PATH`; or use MSYS2 / TDM-GCC.
+- **macOS** — `xcode-select --install`.
+- **Linux (Debian/Ubuntu)** — `sudo apt-get install build-essential`.
 
-### 2. Clone and build
+Then build and self-register:
 
 ```bash
 git clone https://github.com/vaughanb/agent-context-go.git
 cd agent-context-go
 CGO_ENABLED=1 go build -o agent-context-go ./cmd/agent-context-go
+./agent-context-go install
 ```
 
-On Windows (PowerShell):
-
-```powershell
-git clone https://github.com/vaughanb/agent-context-go.git
-cd agent-context-go
-$env:CGO_ENABLED=1; go build -o agent-context-go.exe ./cmd/agent-context-go
-```
-
-This produces a single self-contained binary. Note the full path to it — you'll
-pass it to `claude mcp add` below. On first use the server downloads the
-embedding model (~90 MB) into `CCG_MODEL_DIR`; after that it runs fully offline.
+On Windows (PowerShell): `$env:CGO_ENABLED=1; go build -o agent-context-go.exe ./cmd/agent-context-go`.
 
 ## Configuration
 
@@ -113,26 +102,44 @@ path, under `CCG_INDEX_DIR`. The embedding model and dimension are recorded in
 the index; switching models requires `clear_index` (embeddings from different
 models are not comparable).
 
-## Register with Claude Code
+## Configure your agents
+
+The `install` subcommand detects installed agents and writes each one's MCP
+config in its own format (idempotently, backing up any existing file). The quick
+installers run this for you; you can also run it directly:
 
 ```bash
-claude mcp add agent-context-go -- /absolute/path/to/agent-context-go
+agent-context-go install            # configure every detected agent
+agent-context-go list               # show agents and which are detected
+agent-context-go install --dry-run  # preview changes without writing
+agent-context-go uninstall          # remove this server from agents' configs
 ```
 
-On Windows, point at the built `.exe`:
+Useful flags: `--agents <id,...>` targets specific agents, `--all` targets every
+supported agent, `--env KEY=VALUE` adds an env var to the registered server
+(e.g. for the Ollama backend), `--name` overrides the server name.
 
-```bash
-claude mcp add agent-context-go -- C:\path\to\agent-context-go.exe
-```
+Supported agents:
 
-To use the Ollama backend instead of in-process ONNX:
+| Agent | Config written |
+| ----- | -------------- |
+| Claude Desktop | `claude_desktop_config.json` (`mcpServers`) |
+| Claude Code | via `claude mcp add -s user` (when the CLI is on `PATH`) |
+| Cursor | `~/.cursor/mcp.json` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
+| VS Code (Copilot) | user `mcp.json` (`servers`) |
+| Codex CLI | via `codex mcp add` (when the CLI is on `PATH`) |
+| OpenCode | `~/.config/opencode/opencode.json` (`mcp`) |
+| Cline | `cline_mcp_settings.json` |
 
-```bash
-claude mcp add agent-context-go -e CCG_EMBED_PROVIDER=ollama -e CCG_EMBED_MODEL=nomic-embed-text -- /path/to/agent-context-go
-```
+For CLI-based agents that aren't on `PATH`, `install` prints the exact command
+or config snippet to add manually. After configuring, **restart the agent**
+(fully quit and reopen desktop apps) so it picks up the new server, then ask it
+to index a project and search it.
 
-Then, from Claude Code, ask it to index a project and search it. All diagnostic
-output goes to stderr; stdout carries only the MCP protocol.
+To register with a tool the installer doesn't cover, point it at the binary as a
+stdio MCP server — e.g. `claude mcp add agent-context-go -- /path/to/agent-context-go`.
+All diagnostic output goes to stderr; stdout carries only the MCP protocol.
 
 ## How it works
 
@@ -148,7 +155,7 @@ output goes to stderr; stdout carries only the MCP protocol.
 ## Architecture
 
 ```
-cmd/agent-context-go/   CLI entry: config, deps, run MCP stdio server
+cmd/agent-context-go/   CLI entry: serve (stdio) + install/uninstall/list
 internal/config/        Config from env with validated defaults
 internal/store/         SQLite: schema, files/chunks, FTS5, embedding BLOBs
 internal/chunker/       Chunker interface + tree-sitter impl + line fallback
@@ -156,6 +163,7 @@ internal/embed/         Embedder interface + in-process ONNX + Ollama
 internal/indexer/       Walk → chunk → embed → store; incremental sync; progress
 internal/search/        Hybrid: dense cosine + FTS5 BM25 + RRF fusion
 internal/mcpserver/     The four MCP tools wired to indexer/search
+internal/installer/     Detect agents + write each one's MCP config format
 ```
 
 ## Limitations / roadmap
