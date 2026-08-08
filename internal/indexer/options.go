@@ -33,3 +33,15 @@ func WithBatchSize(n int) Option {
 		}
 	}
 }
+
+// WithConcurrency sets how many files are chunked and embedded in parallel. A
+// non-positive value is ignored. Values above 1 require the injected embedder
+// to be safe for concurrent use (e.g. embed.Pool); the default embedder session
+// is not, so callers using a raw single session must leave this at 1.
+func WithConcurrency(n int) Option {
+	return func(ix *Indexer) {
+		if n > 0 {
+			ix.concurrency = n
+		}
+	}
+}

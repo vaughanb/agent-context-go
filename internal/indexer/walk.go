@@ -80,6 +80,10 @@ func defaultIgnoreDirs() map[string]bool {
 		"dist", "build", "out", "target", "bin", "obj",
 		".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache",
 		".next", ".nuxt", ".cache", ".idea", ".vscode",
+		// Unity generated/cache dirs. Library (esp. Library/PackageCache) holds
+		// the full C# source of every imported package — thousands of .cs files
+		// that would otherwise be embedded alongside the project's own code.
+		"Library", "Temp", "Logs", "Builds", "MemoryCaptures", "UserSettings",
 	)
 }
 

@@ -96,6 +96,15 @@ All configuration is via environment variables with local defaults:
 | `CCG_INDEX_DIR`      | `~/.claude-context-go/index`                   | Where per-codebase SQLite indexes live        |
 | `CCG_MODEL_DIR`      | `~/.claude-context-go/models`                  | ONNX model cache                              |
 | `CCG_OLLAMA_HOST`    | `http://localhost:11434`                       | Ollama daemon URL (ollama provider only)      |
+| `CCG_INDEX_CONCURRENCY` | CPU count (capped at 4)                     | Files chunked/embedded in parallel while indexing |
+
+Indexing embeds files in parallel: `CCG_INDEX_CONCURRENCY` workers each hold
+their own embedder. With the in-process `onnx` provider each worker loads its own
+model session, so higher values trade memory for throughput; raise it on a large
+codebase, or lower it to `1` to minimize memory. Embedding is the indexing
+bottleneck, so this is the main speed knob. For a large first index you can also
+offload embedding to a GPU by pointing `CCG_EMBED_PROVIDER=ollama` at a local
+Ollama daemon.
 
 Each codebase gets its own index database, named by a hash of its absolute
 path, under `CCG_INDEX_DIR`. The embedding model and dimension are recorded in
@@ -145,9 +154,13 @@ All diagnostic output goes to stderr; stdout carries only the MCP protocol.
 
 1. **Index** — walk the codebase (respecting an ignore-directory set and an
    extension allowlist), hash each file, and re-chunk + re-embed only files that
-   are new or changed. tree-sitter cuts chunks on declaration boundaries
-   (functions, types, classes) with a line-splitter fallback. Files deleted from
-   disk are pruned from the index.
+   are new or changed, with up to `CCG_INDEX_CONCURRENCY` files processed in
+   parallel. tree-sitter cuts chunks on declaration boundaries (functions, types,
+   classes) with a line-splitter fallback. Files deleted from disk are pruned
+   from the index. The ignore set covers common build/cache dirs plus generated
+   Unity directories (`Library`, `Temp`, `Logs`, `Builds`), so pointing it at a
+   Unity project root indexes your `Assets` code rather than the engine's package
+   cache.
 2. **Search** — embed the query, score it against every stored chunk vector by
    cosine similarity (brute force), run an FTS5 BM25 lexical query, and fuse the
    two rankings with Reciprocal Rank Fusion.

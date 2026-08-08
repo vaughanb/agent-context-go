@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -299,4 +300,53 @@ func (c manyChunkChunker) Chunk(_ context.Context, _ string, _ []byte) ([]core.C
 		out[i] = core.Chunk{StartLine: i + 1, EndLine: i + 1, Content: "line"}
 	}
 	return out, nil
+}
+
+// TestIndexConcurrentProcessesEveryFile verifies that a parallel run indexes
+// every file exactly once and that an unchanged re-index still skips work. Run
+// with -race to also assert the parallel path is free of data races.
+func TestIndexConcurrentProcessesEveryFile(t *testing.T) {
+	root := t.TempDir()
+	const n = 50
+	for i := 0; i < n; i++ {
+		writeFile(t, root, fmt.Sprintf("pkg%d/file%d.go", i%5, i), fmt.Sprintf("package p\n// file %d", i))
+	}
+
+	store := newMemStore()
+	emb := &countingEmbedder{}
+	ix, err := New(store, oneChunkChunker{}, emb, WithConcurrency(4))
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	require.NoError(t, ix.Index(ctx, root))
+
+	st := ix.Status()
+	assert.Equal(t, PhaseDone, st.Phase)
+	assert.Equal(t, n, st.Total)
+	assert.Equal(t, n, st.Done)
+	assert.Empty(t, st.Errors)
+
+	store.mu.Lock()
+	upserts, replaces, files := store.upserts, store.replaces, len(store.byPath)
+	store.mu.Unlock()
+	assert.Equal(t, n, files, "every file is stored exactly once")
+	assert.Equal(t, n, upserts, "every file is upserted exactly once")
+	assert.Equal(t, n, replaces, "every changed file replaces its chunks exactly once")
+	assert.Equal(t, n, emb.count, "each of the n one-chunk files is embedded exactly once")
+
+	// Re-index with nothing changed: files are re-checked but not re-embedded.
+	require.NoError(t, ix.Index(ctx, root))
+	store.mu.Lock()
+	upserts2, replaces2 := store.upserts, store.replaces
+	store.mu.Unlock()
+	assert.Equal(t, 2*n, upserts2, "second run re-checks every file")
+	assert.Equal(t, n, replaces2, "unchanged files are not re-embedded on the second run")
+	assert.Equal(t, n, emb.count, "no new embeddings on an unchanged re-index")
+}
+
+// TestIndexConcurrencyDefaultsToOne documents that without WithConcurrency the
+// indexer stays single-threaded, keeping a non-thread-safe embedder safe.
+func TestIndexConcurrencyDefaultsToOne(t *testing.T) {
+	ix, _, _ := newIndexer(t)
+	assert.Equal(t, 1, ix.concurrency)
 }

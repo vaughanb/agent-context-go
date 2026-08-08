@@ -68,14 +68,14 @@ func serve() error {
 		return err
 	}
 
-	log.Printf("loading embedding model %q (provider %s); first run may download it…",
-		cfg.EmbedModel, cfg.EmbedProvider)
-	embedder, err := embed.New(ctx, cfg)
+	log.Printf("loading embedding model %q (provider %s, %d parallel); first run may download it…",
+		cfg.EmbedModel, cfg.EmbedProvider, cfg.Concurrency)
+	embedder, err := embed.NewPool(ctx, cfg, cfg.Concurrency)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = embedder.Close() }()
-	log.Printf("embedder ready: model=%q dim=%d", embedder.Model(), embedder.Dim())
+	log.Printf("embedder ready: model=%q dim=%d instances=%d", embedder.Model(), embedder.Dim(), embedder.Size())
 
 	srv, err := mcpserver.New(cfg, embedder, chunker.New())
 	if err != nil {

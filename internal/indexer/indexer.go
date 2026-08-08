@@ -46,6 +46,7 @@ type Store interface {
 const (
 	defaultMaxFileSize = 1 << 20 // 1 MiB: skip larger files (minified bundles, data)
 	defaultBatchSize   = 32      // chunks embedded per Embed call
+	defaultConcurrency = 1       // files processed in parallel; 1 keeps the raw embedder safe
 )
 
 // Indexer maintains one codebase's index. It is safe for concurrent Status
@@ -61,6 +62,11 @@ type Indexer struct {
 	ignoreDirs  map[string]bool
 	maxFileSize int64
 	batchSize   int
+	concurrency int
+
+	// storeMu serializes store mutations so parallel workers never write the
+	// index concurrently; the expensive chunk+embed work stays outside it.
+	storeMu sync.Mutex
 
 	mu       sync.Mutex
 	running  bool
@@ -86,6 +92,7 @@ func New(store Store, chunker Chunker, embedder Embedder, opts ...Option) (*Inde
 		ignoreDirs:  defaultIgnoreDirs(),
 		maxFileSize: defaultMaxFileSize,
 		batchSize:   defaultBatchSize,
+		concurrency: defaultConcurrency,
 	}
 	for _, opt := range opts {
 		opt(ix)
@@ -148,15 +155,11 @@ func (ix *Indexer) run(ctx context.Context, absRoot string) error {
 
 	seen := make(map[string]bool, len(files))
 	for _, f := range files {
-		if err := ctx.Err(); err != nil {
-			ix.fail(fmt.Sprintf("cancelled: %v", err))
-			return fmt.Errorf("indexer: %w", err)
-		}
 		seen[f.rel] = true
-		if err := ix.indexFile(ctx, f); err != nil {
-			ix.addError(fmt.Sprintf("%s: %v", f.rel, err))
-		}
-		ix.incDone()
+	}
+
+	if err := ix.indexFiles(ctx, files); err != nil {
+		return err
 	}
 
 	ix.setPhase(PhasePruning)
@@ -166,6 +169,71 @@ func (ix *Indexer) run(ctx context.Context, absRoot string) error {
 
 	ix.setPhase(PhaseDone)
 	return nil
+}
+
+// indexFiles processes every candidate, chunking and embedding up to
+// ix.concurrency files in parallel. Per-file errors are recorded in progress and
+// do not stop the run; the only returned error is context cancellation, which
+// stops dispatching new work and is surfaced as a fatal run failure. Store
+// writes inside indexFile are serialized (see storeMu), so only the CPU-bound
+// chunk+embed work actually runs concurrently.
+func (ix *Indexer) indexFiles(ctx context.Context, files []candidate) error {
+	workers := ix.concurrency
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+
+	if workers <= 1 {
+		for _, f := range files {
+			if err := ctx.Err(); err != nil {
+				ix.fail(fmt.Sprintf("cancelled: %v", err))
+				return fmt.Errorf("indexer: %w", err)
+			}
+			ix.processOne(ctx, f)
+		}
+		return nil
+	}
+
+	jobs := make(chan candidate)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range jobs {
+				ix.processOne(ctx, f)
+			}
+		}()
+	}
+
+	var cancelled error
+	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			cancelled = err
+			break
+		}
+		jobs <- f
+	}
+	close(jobs)
+	wg.Wait()
+
+	if cancelled != nil {
+		ix.fail(fmt.Sprintf("cancelled: %v", cancelled))
+		return fmt.Errorf("indexer: %w", cancelled)
+	}
+	return nil
+}
+
+// processOne indexes a single file, recording any failure in progress and
+// advancing the done counter. It is safe to call from multiple goroutines.
+func (ix *Indexer) processOne(ctx context.Context, f candidate) {
+	if err := ix.indexFile(ctx, f); err != nil {
+		ix.addError(fmt.Sprintf("%s: %v", f.rel, err))
+	}
+	ix.incDone()
 }
 
 // indexFile reads, hashes, and — only if changed — re-chunks and re-embeds a
@@ -182,7 +250,9 @@ func (ix *Indexer) indexFile(ctx context.Context, f candidate) error {
 		ContentHash: hashBytes(src),
 	}
 
+	ix.storeMu.Lock()
 	id, changed, err := ix.store.UpsertFile(ctx, meta)
+	ix.storeMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("upsert: %w", err)
 	}
@@ -206,7 +276,10 @@ func (ix *Indexer) indexFile(ctx context.Context, f candidate) error {
 	// ReplaceChunks commits the content hash only now that chunks are ready,
 	// so a failure above leaves the file marked changed for the next run. A
 	// file yielding no chunks still commits (empty), so it is not reprocessed.
-	if err := ix.store.ReplaceChunks(ctx, id, meta, chunks, vecs); err != nil {
+	ix.storeMu.Lock()
+	err = ix.store.ReplaceChunks(ctx, id, meta, chunks, vecs)
+	ix.storeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("store chunks: %w", err)
 	}
 	return nil
