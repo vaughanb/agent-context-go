@@ -11,6 +11,12 @@
 #   $env:ACG_NO_CONFIGURE set to skip auto-configuring agents
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell 5.1 may default to TLS 1.0/1.1, which GitHub rejects.
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
+
 $repo = 'vaughanb/agent-context-go'
 $bin = 'agent-context-go'
 
@@ -33,7 +39,14 @@ New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
     Write-Host "Downloading $asset ($version)..."
     $binTmp = Join-Path $tmp $asset
-    Invoke-WebRequest -Uri "$base/$asset" -OutFile $binTmp -UseBasicParsing
+    try {
+        Invoke-WebRequest -Uri "$base/$asset" -OutFile $binTmp -UseBasicParsing
+    } catch {
+        throw "Could not download $asset. The release may still be building, or no " +
+              "prebuilt binary exists for this platform/version yet. Check " +
+              "https://github.com/$repo/releases and try again in a few minutes. " +
+              "($($_.Exception.Message))"
+    }
 
     # Verify checksum when the release publishes one. Downloading the sums file
     # is best-effort; a mismatch, once we have the file, is fatal.

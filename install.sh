@@ -56,7 +56,9 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 info "Downloading $asset ($version)…"
-dl "$base/$asset" "$tmp/$BIN" || err "download failed: $base/$asset"
+dl "$base/$asset" "$tmp/$BIN" || err "download failed: $base/$asset
+The release may still be building, or no binary exists for $os/$arch yet.
+Check https://github.com/$REPO/releases and try again in a few minutes."
 
 # Verify checksum when the release publishes one.
 if dl "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
