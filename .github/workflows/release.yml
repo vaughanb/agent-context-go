@@ -1,9 +1,11 @@
 name: release
 
-# Build prebuilt CGO binaries for each OS/arch and attach them to a GitHub
-# Release when a v* tag is pushed. tree-sitter needs CGO, so each target is
-# built on a matching native runner (or cross-compiled with the right C
-# toolchain) rather than via pure Go cross-compilation.
+# Build prebuilt CGO binaries for each OS/arch and publish them to a GitHub
+# Release when a v* tag is pushed. Each architecture uploads its own binary to
+# the release the moment it finishes building, so a slow or queued runner (e.g.
+# the Intel-mac leg) never holds up the others. tree-sitter needs CGO, so each
+# target is built on a matching native runner or cross-compiled with the right
+# C toolchain rather than via pure-Go cross-compilation.
 
 on:
   push:
@@ -14,8 +16,25 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    name: create release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create the release and attach install scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$REPO" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" install.sh install.ps1 --repo "$REPO" --clobber
+
   build:
     name: build ${{ matrix.name }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -36,43 +55,35 @@ jobs:
         if: matrix.apt != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
 
-      - name: Build
+      - name: Build and publish this architecture
         shell: bash
         env:
           CGO_ENABLED: "1"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CC: ${{ matrix.cc }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           out="agent-context-go_${{ matrix.goos }}_${{ matrix.goarch }}${{ matrix.ext }}"
           mkdir -p dist
           go build -trimpath -ldflags "-s -w" -o "dist/$out" ./cmd/agent-context-go
+          # Publish as soon as this leg is built — independent of the others.
+          gh release upload "$TAG" "dist/$out" --repo "$REPO" --clobber
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: dist/*
-          if-no-files-found: error
-
-  release:
-    name: publish release
+  checksums:
+    name: publish checksums
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Generate checksums
-        run: cd dist && sha256sum * > SHA256SUMS
-
-      - name: Publish
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            dist/*
-            install.sh
-            install.ps1
+      - name: Generate and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir dist && cd dist
+          gh release download "$TAG" --repo "$REPO" --pattern 'agent-context-go_*'
+          sha256sum agent-context-go_* > SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --repo "$REPO" --clobber
