@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 )
 
@@ -49,6 +50,12 @@ type Config struct {
 	// OllamaHost is the base URL of the local Ollama daemon, used only when
 	// EmbedProvider is ProviderOllama.
 	OllamaHost string
+
+	// Concurrency is how many files are chunked and embedded in parallel during
+	// indexing. For the in-process ONNX provider it also sizes the embedder
+	// pool (one model session per worker), so higher values trade memory for
+	// throughput. Always at least 1.
+	Concurrency int
 }
 
 const (
@@ -81,6 +88,15 @@ func New() (*Config, error) {
 		ModelDir:      envOr("CCG_MODEL_DIR", filepath.Join(base, "models")),
 		ONNXFile:      envOr("CCG_ONNX_FILE", defaultONNXFile),
 		OllamaHost:    envOr("CCG_OLLAMA_HOST", defaultOllamaHost),
+		Concurrency:   defaultConcurrency(),
+	}
+
+	if raw := os.Getenv("CCG_INDEX_CONCURRENCY"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, fmt.Errorf("parse CCG_INDEX_CONCURRENCY %q: %w", raw, err)
+		}
+		c.Concurrency = n
 	}
 
 	if raw := os.Getenv("CCG_EMBED_DIM"); raw != "" {
@@ -112,7 +128,25 @@ func (c *Config) validate() error {
 	if c.EmbedDim <= 0 {
 		return fmt.Errorf("embed dim must be positive, got %d", c.EmbedDim)
 	}
+	if c.Concurrency < 1 {
+		return fmt.Errorf("concurrency must be at least 1, got %d", c.Concurrency)
+	}
 	return nil
+}
+
+// defaultConcurrency picks a parallelism level from the machine's CPU count,
+// capped so the ONNX embedder pool (one model session per worker) does not use
+// an unreasonable amount of memory. Override with CCG_INDEX_CONCURRENCY.
+func defaultConcurrency() int {
+	const cap = 4
+	n := runtime.NumCPU()
+	if n > cap {
+		n = cap
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // DBPath returns the SQLite database path for the codebase rooted at absRoot.

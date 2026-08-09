@@ -56,8 +56,10 @@ type handle struct {
 }
 
 // New constructs a Server. cfg, embedder, and chunker must be non-nil. The
-// embedder is wrapped so its underlying model session is never called
-// concurrently by a background index and a search.
+// embedder must be safe for concurrent use: an index run and a search may embed
+// at the same time, and with cfg.Concurrency > 1 several index workers embed in
+// parallel. embed.Pool satisfies this (it provides mutual exclusion per session
+// even at size 1).
 func New(cfg *config.Config, embedder embed.Embedder, chunker Chunker) (*Server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("mcpserver: config must not be nil")
@@ -70,7 +72,7 @@ func New(cfg *config.Config, embedder embed.Embedder, chunker Chunker) (*Server,
 	}
 	return &Server{
 		cfg:      cfg,
-		embedder: newSyncEmbedder(embedder),
+		embedder: embedder,
 		chunker:  chunker,
 		baseCtx:  context.Background(),
 		handles:  map[string]*handle{},
@@ -134,7 +136,7 @@ func (s *Server) handleFor(ctx context.Context, path string) (*handle, string, e
 	if err != nil {
 		return nil, absRoot, fmt.Errorf("open index for %q: %w", absRoot, err)
 	}
-	ix, err := indexer.New(st, s.chunker, s.embedder)
+	ix, err := indexer.New(st, s.chunker, s.embedder, indexer.WithConcurrency(s.cfg.Concurrency))
 	if err != nil {
 		_ = st.Close()
 		return nil, absRoot, fmt.Errorf("build indexer for %q: %w", absRoot, err)
@@ -163,22 +165,3 @@ func (s *Server) Close() error {
 	s.handles = map[string]*handle{}
 	return firstErr
 }
-
-// syncEmbedder serializes access to an embedder so a background index and a
-// concurrent search never call the underlying model session at the same time.
-type syncEmbedder struct {
-	mu sync.Mutex
-	e  embed.Embedder
-}
-
-func newSyncEmbedder(e embed.Embedder) *syncEmbedder { return &syncEmbedder{e: e} }
-
-func (s *syncEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.e.Embed(ctx, texts)
-}
-
-func (s *syncEmbedder) Dim() int      { return s.e.Dim() }
-func (s *syncEmbedder) Model() string { return s.e.Model() }
-func (s *syncEmbedder) Close() error  { return s.e.Close() }

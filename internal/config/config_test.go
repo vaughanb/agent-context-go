@@ -23,6 +23,14 @@ func TestNewDefaults(t *testing.T) {
 	assert.Equal(t, defaultEmbedDim, c.EmbedDim)
 	assert.NotEmpty(t, c.IndexDir)
 	assert.NotEmpty(t, c.ModelDir)
+	assert.GreaterOrEqual(t, c.Concurrency, 1, "concurrency defaults to at least 1")
+}
+
+func TestNewConcurrencyOverride(t *testing.T) {
+	t.Setenv("CCG_INDEX_CONCURRENCY", "8")
+	c, err := New()
+	require.NoError(t, err)
+	assert.Equal(t, 8, c.Concurrency)
 }
 
 func TestNewOllamaDefaultModel(t *testing.T) {
@@ -54,8 +62,10 @@ func TestNewEnvOverrides(t *testing.T) {
 
 func TestNewInvalid(t *testing.T) {
 	testCases := map[string]map[string]string{
-		"bad provider": {"CCG_EMBED_PROVIDER": "cloud"},
-		"bad dim":      {"CCG_EMBED_DIM": "not-a-number"},
+		"bad provider":     {"CCG_EMBED_PROVIDER": "cloud"},
+		"bad dim":          {"CCG_EMBED_DIM": "not-a-number"},
+		"bad concurrency":  {"CCG_INDEX_CONCURRENCY": "not-a-number"},
+		"zero concurrency": {"CCG_INDEX_CONCURRENCY": "0"},
 	}
 	for name, env := range testCases {
 		t.Run(name, func(t *testing.T) {
