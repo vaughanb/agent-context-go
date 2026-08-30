@@ -16,9 +16,13 @@ import (
 // Store supplies the two retrieval channels search fuses. It is a narrow view
 // of the full index store (interface segregation): only what search reads.
 type Store interface {
-	// AllVectors returns every chunk with its embedding, for brute-force
-	// cosine scoring.
-	AllVectors(ctx context.Context) ([]core.VecRow, error)
+	// AllEmbeddings returns every chunk id with its embedding, for brute-force
+	// cosine scoring. Implementations may cache and share the result across
+	// calls; callers must treat it as read-only.
+	AllEmbeddings(ctx context.Context) ([]core.EmbRow, error)
+	// ChunksByIDs hydrates the full stored rows for the given chunk ids, keyed
+	// by id; unknown ids are absent from the result.
+	ChunksByIDs(ctx context.Context, ids []int64) (map[int64]core.Hit, error)
 	// LexicalSearch returns up to k BM25-ranked hits for query, best-first.
 	LexicalSearch(ctx context.Context, query string, k int) ([]core.Hit, error)
 }
@@ -109,8 +113,10 @@ func (s *Service) Search(ctx context.Context, query string, topN int) ([]core.Hi
 	return fused, nil
 }
 
-// denseHits embeds the query and scores it against every stored chunk vector
-// by cosine similarity, returning the top denseK hits best-first.
+// denseHits embeds the query, scores it against every cached chunk embedding
+// by cosine similarity, then hydrates full rows for only the top denseK ids —
+// so the per-query cost is one embedding, one pass over the vectors, and a
+// handful of row fetches, never a scan of every chunk's text.
 func (s *Service) denseHits(ctx context.Context, query string) ([]core.Hit, error) {
 	vecs, err := s.embedder.Embed(ctx, []string{query})
 	if err != nil {
@@ -121,32 +127,55 @@ func (s *Service) denseHits(ctx context.Context, query string) ([]core.Hit, erro
 	}
 	q := vecs[0]
 
-	rows, err := s.store.AllVectors(ctx)
+	rows, err := s.store.AllEmbeddings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("search: load vectors: %w", err)
+		return nil, fmt.Errorf("search: load embeddings: %w", err)
 	}
 
-	hits := make([]core.Hit, 0, len(rows))
+	type scored struct {
+		id    int64
+		score float64
+	}
+	best := make([]scored, 0, len(rows))
 	for _, r := range rows {
 		if len(r.Vector) != len(q) {
 			// Dimension mismatch means the stored vector came from a different
 			// model; skip rather than compare incomparable spaces.
 			continue
 		}
-		hits = append(hits, core.Hit{
-			ChunkID:   r.ChunkID,
-			Path:      r.Path,
-			StartLine: r.StartLine,
-			EndLine:   r.EndLine,
-			Symbol:    r.Symbol,
-			Content:   r.Content,
-			Score:     cosine(q, r.Vector),
-		})
+		best = append(best, scored{id: r.ChunkID, score: cosine(q, r.Vector)})
+	}
+	sort.SliceStable(best, func(i, j int) bool {
+		if best[i].score != best[j].score {
+			return best[i].score > best[j].score
+		}
+		return best[i].id < best[j].id
+	})
+	if len(best) > s.denseK {
+		best = best[:s.denseK]
+	}
+	if len(best) == 0 {
+		return nil, nil
 	}
 
-	sortHitsDesc(hits)
-	if len(hits) > s.denseK {
-		hits = hits[:s.denseK]
+	ids := make([]int64, len(best))
+	for i, b := range best {
+		ids[i] = b.id
+	}
+	byID, err := s.store.ChunksByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("search: hydrate top chunks: %w", err)
+	}
+
+	hits := make([]core.Hit, 0, len(best))
+	for _, b := range best {
+		h, ok := byID[b.id]
+		if !ok {
+			// The chunk was deleted between scoring and hydration; skip it.
+			continue
+		}
+		h.Score = b.score
+		hits = append(hits, h)
 	}
 	return hits, nil
 }

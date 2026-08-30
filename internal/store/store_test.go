@@ -14,7 +14,7 @@ import (
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "index.db")
-	s, err := New(context.Background(), path, "test-model", 3)
+	s, err := New(context.Background(), path, "test-model", 3, "cv-test")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
@@ -29,14 +29,16 @@ func TestNewValidation(t *testing.T) {
 	testCases := map[string]struct {
 		model string
 		dim   int
+		cv    string
 	}{
-		"empty model":  {model: "", dim: 3},
-		"zero dim":     {model: "m", dim: 0},
-		"negative dim": {model: "m", dim: -1},
+		"empty model":           {model: "", dim: 3, cv: "1"},
+		"zero dim":              {model: "m", dim: 0, cv: "1"},
+		"negative dim":          {model: "m", dim: -1, cv: "1"},
+		"empty chunker version": {model: "m", dim: 3, cv: ""},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			_, err := New(ctx, filepath.Join(dir, name+".db"), tc.model, tc.dim)
+			_, err := New(ctx, filepath.Join(dir, name+".db"), tc.model, tc.dim, tc.cv)
 			require.Error(t, err)
 		})
 	}
@@ -46,7 +48,7 @@ func TestNewModelMismatch(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "index.db")
 
-	s, err := New(ctx, path, "model-a", 3)
+	s, err := New(ctx, path, "model-a", 3, "cv1")
 	require.NoError(t, err)
 	require.NoError(t, s.Close())
 
@@ -59,14 +61,58 @@ func TestNewModelMismatch(t *testing.T) {
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			_, err := New(ctx, path, tc.model, tc.dim)
+			_, err := New(ctx, path, tc.model, tc.dim, "cv1")
 			require.ErrorIs(t, err, ErrModelMismatch)
 		})
 	}
 
-	reopened, err := New(ctx, path, "model-a", 3)
+	reopened, err := New(ctx, path, "model-a", 3, "cv1")
 	require.NoError(t, err)
 	require.NoError(t, reopened.Close())
+}
+
+func TestChunkerVersionChangeMarksFilesChanged(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "index.db")
+
+	s, err := New(ctx, path, "model-a", 3, "cv1")
+	require.NoError(t, err)
+	f := core.File{Path: "a.cs", ContentHash: "h1"}
+	id, _, err := s.UpsertFile(ctx, f)
+	require.NoError(t, err)
+	require.NoError(t, s.ReplaceChunks(ctx, id, f,
+		[]core.Chunk{{StartLine: 1, EndLine: 1, Content: "class A {}"}},
+		[][]float32{vec(1, 0, 0)}))
+	_, changed, err := s.UpsertFile(ctx, f)
+	require.NoError(t, err)
+	require.False(t, changed, "file is up to date under cv1")
+	require.NoError(t, s.Close())
+
+	// Reopening with a new chunker version marks every file changed while the
+	// old chunks stay searchable until re-indexed.
+	s2, err := New(ctx, path, "model-a", 3, "cv2")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s2.Close() })
+
+	_, changed, err = s2.UpsertFile(ctx, f)
+	require.NoError(t, err)
+	assert.True(t, changed, "chunker upgrade must mark unchanged files for re-chunking")
+
+	rows, err := s2.AllEmbeddings(ctx)
+	require.NoError(t, err)
+	assert.Len(t, rows, 1, "existing chunks remain searchable before the re-index")
+
+	// A third open with the same version must not mark files again.
+	require.NoError(t, s2.ReplaceChunks(ctx, id, f,
+		[]core.Chunk{{StartLine: 1, EndLine: 1, Content: "class A {}"}},
+		[][]float32{vec(1, 0, 0)}))
+	require.NoError(t, s2.Close())
+	s3, err := New(ctx, path, "model-a", 3, "cv2")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s3.Close() })
+	_, changed, err = s3.UpsertFile(ctx, f)
+	require.NoError(t, err)
+	assert.False(t, changed, "same chunker version keeps files up to date")
 }
 
 func TestUpsertFileChangeDetection(t *testing.T) {
@@ -135,20 +181,32 @@ func TestReplaceChunksAndVectors(t *testing.T) {
 	vecs := [][]float32{vec(1, 0, 0), vec(0, 1, 0)}
 	require.NoError(t, s.ReplaceChunks(ctx, id, meta, chunks, vecs))
 
-	rows, err := s.AllVectors(ctx)
+	rows, err := s.AllEmbeddings(ctx)
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
-	assert.Equal(t, "a.go", rows[0].Path)
 	assert.Equal(t, vec(1, 0, 0), rows[0].Vector)
 
-	// Replacing supersedes the prior chunks rather than appending.
+	hydrated, err := s.ChunksByIDs(ctx, []int64{rows[0].ChunkID, rows[1].ChunkID, 9999})
+	require.NoError(t, err)
+	require.Len(t, hydrated, 2, "unknown ids are absent, not an error")
+	assert.Equal(t, "a.go", hydrated[rows[0].ChunkID].Path)
+	assert.Equal(t, "Foo", hydrated[rows[0].ChunkID].Symbol)
+	assert.Equal(t, "func Foo() {}", hydrated[rows[0].ChunkID].Content)
+
+	empty, err := s.ChunksByIDs(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	// Replacing supersedes the prior chunks rather than appending — and the
+	// embedding cache populated by the read above must be invalidated by the
+	// write, not served stale.
 	require.NoError(t, s.ReplaceChunks(ctx, id, meta,
 		[]core.Chunk{{StartLine: 1, EndLine: 2, Content: "new"}},
 		[][]float32{vec(0, 0, 1)}))
-	rows, err = s.AllVectors(ctx)
+	rows, err = s.AllEmbeddings(ctx)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
-	assert.Equal(t, "new", rows[0].Content)
+	assert.Equal(t, vec(0, 0, 1), rows[0].Vector)
 }
 
 func TestReplaceChunksValidation(t *testing.T) {
@@ -195,7 +253,7 @@ func TestDeleteFileCascades(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, paths)
 
-	rows, err := s.AllVectors(ctx)
+	rows, err := s.AllEmbeddings(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, rows, "chunks should be removed by cascade")
 
@@ -221,6 +279,13 @@ func TestLexicalSearch(t *testing.T) {
 	require.Len(t, hits, 1)
 	assert.Equal(t, "ParseConfig", hits[0].Symbol)
 
+	// Tokens match as prefixes, so a query word finds the compound
+	// identifiers that start with it.
+	hits, err = s.LexicalSearch(ctx, "parse", 10)
+	require.NoError(t, err)
+	require.Len(t, hits, 1, "prefix should match ParseConfig")
+	assert.Equal(t, "ParseConfig", hits[0].Symbol)
+
 	// Punctuation and FTS operators must not break the query.
 	hits, err = s.LexicalSearch(ctx, "ParseConfig() error;", 10)
 	require.NoError(t, err)
@@ -234,7 +299,7 @@ func TestLexicalSearch(t *testing.T) {
 func TestClearKeepsMeta(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "index.db")
-	s, err := New(ctx, path, "model-a", 3)
+	s, err := New(ctx, path, "model-a", 3, "cv1")
 	require.NoError(t, err)
 
 	meta := core.File{Path: "a.go", ContentHash: "h1"}
@@ -251,7 +316,7 @@ func TestClearKeepsMeta(t *testing.T) {
 	require.NoError(t, s.Close())
 
 	// Meta survived, so reopening with the same model succeeds.
-	reopened, err := New(ctx, path, "model-a", 3)
+	reopened, err := New(ctx, path, "model-a", 3, "cv1")
 	require.NoError(t, err)
 	require.NoError(t, reopened.Close())
 }

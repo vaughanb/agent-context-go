@@ -88,7 +88,9 @@ func defaultIgnoreDirs() map[string]bool {
 }
 
 // defaultAllowExts are the file extensions indexed by default: source files
-// (tree-sitter-chunked or line-chunked) plus common docs and config.
+// (tree-sitter-chunked or line-chunked) plus common docs and config. Unity
+// serialized data (.asset, .unity, .prefab, .meta) is deliberately absent —
+// those are enormous generated YAML that would swamp the index.
 func defaultAllowExts() map[string]bool {
 	return set(
 		".go", ".py", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
@@ -99,6 +101,8 @@ func defaultAllowExts() map[string]bool {
 		".html", ".css", ".scss",
 		".md", ".rst", ".txt",
 		".json", ".yaml", ".yml", ".toml", ".ini",
+		// Unity/game source that is hand-written, not generated.
+		".shader", ".hlsl", ".cginc", ".compute", ".asmdef", ".uxml", ".uss",
 	)
 }
 

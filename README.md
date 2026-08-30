@@ -11,7 +11,7 @@ but every remote piece is replaced with a local equivalent:
 | Cloud embeddings (OpenAI…) | In-process ONNX via hugot, or a local Ollama daemon |
 | Milvus / Zilliz Cloud      | SQLite (embeddings as BLOBs + brute-force cosine) |
 | BM25 lexical index         | SQLite FTS5 (`bm25()` ranking)                    |
-| AST chunking               | tree-sitter (Go, Python, JS/TS)                   |
+| AST chunking               | tree-sitter (Go, Python, JS/TS, C#)               |
 | Incremental re-index       | Per-file content-hash diffing in SQLite           |
 
 Everything runs on your machine. Indexing and search make **no network calls**
@@ -97,6 +97,7 @@ All configuration is via environment variables with local defaults:
 | `CCG_MODEL_DIR`      | `~/.claude-context-go/models`                  | ONNX model cache                              |
 | `CCG_OLLAMA_HOST`    | `http://localhost:11434`                       | Ollama daemon URL (ollama provider only)      |
 | `CCG_INDEX_CONCURRENCY` | CPU count (capped at 4)                     | Files chunked/embedded in parallel while indexing |
+| `CCG_LOW_PRIORITY`   | `1`                                            | Run at below-normal OS priority (`0` disables)  |
 
 Indexing embeds files in parallel: `CCG_INDEX_CONCURRENCY` workers each hold
 their own embedder. With the in-process `onnx` provider each worker loads its own
@@ -106,10 +107,18 @@ bottleneck, so this is the main speed knob. For a large first index you can also
 offload embedding to a GPU by pointing `CCG_EMBED_PROVIDER=ollama` at a local
 Ollama daemon.
 
+The server also drops itself to below-normal scheduling priority by default
+(`CCG_LOW_PRIORITY=0` restores normal priority), so a long first index yields
+CPU to whatever you're working in — an IDE, a game editor — instead of
+crawling the machine.
+
 Each codebase gets its own index database, named by a hash of its absolute
 path, under `CCG_INDEX_DIR`. The embedding model and dimension are recorded in
 the index; switching models requires `clear_index` (embeddings from different
-models are not comparable).
+models are not comparable). The chunker's algorithm version is recorded too:
+after upgrading to a build with a newer chunker, every file is automatically
+marked stale and re-chunked on the next `index_codebase` run — no manual
+`clear_index` needed, and the old chunks stay searchable until then.
 
 ## Configure your agents
 
@@ -156,14 +165,23 @@ All diagnostic output goes to stderr; stdout carries only the MCP protocol.
    extension allowlist), hash each file, and re-chunk + re-embed only files that
    are new or changed, with up to `CCG_INDEX_CONCURRENCY` files processed in
    parallel. tree-sitter cuts chunks on declaration boundaries (functions, types,
-   classes) with a line-splitter fallback. Files deleted from disk are pruned
-   from the index. The ignore set covers common build/cache dirs plus generated
-   Unity directories (`Library`, `Temp`, `Logs`, `Builds`), so pointing it at a
-   Unity project root indexes your `Assets` code rather than the engine's package
-   cache.
+   classes) with a line-splitter fallback. Container declarations — C#
+   namespaces and classes, Python/JS/TS classes — are descended into rather
+   than split blindly: each member becomes its own chunk with a qualified
+   symbol (`PlayerController.UpdateLookRotation`), and the container's header
+   (attributes, declaration, base list) is a chunk of its own. Files deleted
+   from disk are pruned from the index. The ignore set covers common
+   build/cache dirs plus generated Unity directories (`Library`, `Temp`,
+   `Logs`, `Builds`), so pointing it at a Unity project root indexes your
+   `Assets` code (including `.shader`/`.hlsl`/`.cginc`/`.asmdef` sources)
+   rather than the engine's package cache; Unity serialized YAML (`.asset`,
+   `.unity`, `.prefab`) is deliberately excluded.
 2. **Search** — embed the query, score it against every stored chunk vector by
-   cosine similarity (brute force), run an FTS5 BM25 lexical query, and fuse the
-   two rankings with Reciprocal Rank Fusion.
+   cosine similarity (brute force over an in-memory embedding cache that
+   writes invalidate), hydrate full rows for only the top dense candidates,
+   run an FTS5 BM25 lexical query (tokens match as prefixes, so `damage`
+   finds `damageAmount`), and fuse the two rankings with Reciprocal Rank
+   Fusion.
 
 ## Architecture
 
@@ -191,9 +209,9 @@ internal/installer/     Detect agents + write each one's MCP config format
   stored and searchable lexically). For large chunks, the code-tuned
   `jinaai/jina-embeddings-v2-base-code` (8192 tokens) is a drop-in upgrade via
   `CCG_EMBED_MODEL` (also set `CCG_EMBED_DIM=768` and `CCG_ONNX_FILE`).
-- Starter languages for AST chunking are Go, Python, and JavaScript/TypeScript;
+- Languages with AST chunking are Go, Python, JavaScript/TypeScript, and C#;
   others fall back to line-based chunking. Adding a language is one grammar
-  dependency plus registration.
+  dependency plus registration (plus container kinds if its declarations nest).
 
 ## Development
 

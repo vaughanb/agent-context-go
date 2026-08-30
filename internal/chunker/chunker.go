@@ -18,6 +18,17 @@ type Chunker interface {
 	Chunk(ctx context.Context, path string, src []byte) ([]core.Chunk, error)
 }
 
+// Version identifies the chunking algorithm. The store records it per index
+// and marks every file changed when it differs, so a chunker upgrade
+// re-chunks existing indexes instead of leaving stale chunk boundaries
+// behind (content-hash change detection alone would never notice). Bump it
+// whenever a change alters the chunks produced for identical input: new
+// grammars, tuning changes, splitting or merging logic.
+//
+// Version 2: C# grammar, container descent with qualified symbols, and the
+// merge size cap.
+const Version = "2"
+
 // Default tuning. maxLines bounds a chunk so no single embedding covers too
 // much; overlap keeps context across split boundaries; mergeMaxLines is the
 // size under which trivial symbol-less chunks are folded into a neighbor.
@@ -62,6 +73,10 @@ func New(opts ...Option) *Service {
 	}
 	return s
 }
+
+// Version reports the chunking algorithm version for index bookkeeping (see
+// the package-level Version constant).
+func (s *Service) Version() string { return Version }
 
 // Chunk implements Chunker. It never returns an error for an unsupported
 // language or a parse failure; it falls back to line-based chunking so every
@@ -113,8 +128,10 @@ func (s *Service) lineChunks(content []byte, startLine int, symbol string) []cor
 }
 
 // mergeTrivial folds consecutive tiny, symbol-less chunks into the previous
-// chunk to reduce noise (e.g. a package clause followed by a lone import).
-// Chunks carrying a symbol are always preserved as distinct units.
+// chunk to reduce noise (e.g. a package clause followed by a lone import, or
+// a run of C# field declarations). Chunks carrying a symbol are always
+// preserved as distinct units, and a merged chunk stops absorbing once it
+// reaches maxLines so a long run cannot snowball into one oversized chunk.
 func (s *Service) mergeTrivial(chunks []core.Chunk) []core.Chunk {
 	if len(chunks) < 2 {
 		return chunks
@@ -124,7 +141,7 @@ func (s *Service) mergeTrivial(chunks []core.Chunk) []core.Chunk {
 	for _, c := range chunks[1:] {
 		prev := &out[len(out)-1]
 		trivial := c.Symbol == "" && (c.EndLine-c.StartLine+1) <= s.mergeMaxLine
-		if trivial && prev.Symbol == "" {
+		if trivial && prev.Symbol == "" && (prev.EndLine-prev.StartLine+1) < s.maxLines {
 			prev.Content += "\n" + c.Content
 			prev.EndLine = c.EndLine
 			continue

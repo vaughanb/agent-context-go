@@ -10,14 +10,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeStore serves canned vectors and lexical hits.
+// fakeStore serves canned embeddings, hydration rows, and lexical hits. It
+// records the ids passed to ChunksByIDs so tests can assert that only the top
+// candidates are hydrated.
 type fakeStore struct {
-	vectors []core.VecRow
-	lexical []core.Hit
+	embeddings  []core.EmbRow
+	rows        map[int64]core.Hit
+	lexical     []core.Hit
+	hydratedIDs []int64
 }
 
-func (f *fakeStore) AllVectors(context.Context) ([]core.VecRow, error) {
-	return f.vectors, nil
+// addChunk registers a chunk with both an embedding and a hydratable row.
+func (f *fakeStore) addChunk(id int64, path string, vector []float32) {
+	f.embeddings = append(f.embeddings, core.EmbRow{ChunkID: id, Vector: vector})
+	if f.rows == nil {
+		f.rows = map[int64]core.Hit{}
+	}
+	f.rows[id] = core.Hit{ChunkID: id, Path: path}
+}
+
+func (f *fakeStore) AllEmbeddings(context.Context) ([]core.EmbRow, error) {
+	return f.embeddings, nil
+}
+
+func (f *fakeStore) ChunksByIDs(_ context.Context, ids []int64) (map[int64]core.Hit, error) {
+	f.hydratedIDs = ids
+	out := make(map[int64]core.Hit, len(ids))
+	for _, id := range ids {
+		if h, ok := f.rows[id]; ok {
+			out[id] = h
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) LexicalSearch(_ context.Context, _ string, k int) ([]core.Hit, error) {
@@ -89,28 +113,50 @@ func TestSearchEmptyInputs(t *testing.T) {
 func TestSearchDenseRanksByCosine(t *testing.T) {
 	// Query points along +x. Chunk 1 aligns with it, chunk 2 is orthogonal,
 	// chunk 3 points away. Dense ranking must be 1, 2, 3.
-	store := &fakeStore{
-		vectors: []core.VecRow{
-			{ChunkID: 1, Path: "a.go", Vector: []float32{1, 0}},
-			{ChunkID: 2, Path: "b.go", Vector: []float32{0, 1}},
-			{ChunkID: 3, Path: "c.go", Vector: []float32{-1, 0}},
-		},
-	}
+	store := &fakeStore{}
+	store.addChunk(1, "a.go", []float32{1, 0})
+	store.addChunk(2, "b.go", []float32{0, 1})
+	store.addChunk(3, "c.go", []float32{-1, 0})
 	s, err := New(store, &fakeEmbedder{vec: []float32{1, 0}})
 	require.NoError(t, err)
 
 	hits, err := s.Search(context.Background(), "query", 10)
 	require.NoError(t, err)
 	assert.Equal(t, []int64{1, 2, 3}, hitIDs(hits))
+	assert.Equal(t, "a.go", hits[0].Path, "hits must be hydrated with stored rows")
 }
 
 func TestSearchSkipsDimensionMismatch(t *testing.T) {
-	store := &fakeStore{
-		vectors: []core.VecRow{
-			{ChunkID: 1, Path: "a.go", Vector: []float32{1, 0}},
-			{ChunkID: 2, Path: "b.go", Vector: []float32{1, 0, 0}}, // wrong dim
-		},
-	}
+	store := &fakeStore{}
+	store.addChunk(1, "a.go", []float32{1, 0})
+	store.addChunk(2, "b.go", []float32{1, 0, 0}) // wrong dim
+	s, err := New(store, &fakeEmbedder{vec: []float32{1, 0}})
+	require.NoError(t, err)
+
+	hits, err := s.Search(context.Background(), "query", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{1}, hitIDs(hits))
+}
+
+func TestSearchHydratesOnlyTopDenseK(t *testing.T) {
+	store := &fakeStore{}
+	store.addChunk(1, "a.go", []float32{1, 0})
+	store.addChunk(2, "b.go", []float32{0.9, 0.1})
+	store.addChunk(3, "c.go", []float32{0.8, 0.2})
+	s, err := New(store, &fakeEmbedder{vec: []float32{1, 0}}, WithDenseK(2))
+	require.NoError(t, err)
+
+	hits, err := s.Search(context.Background(), "query", 10)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{1, 2}, hitIDs(hits))
+	assert.Len(t, store.hydratedIDs, 2, "only the top denseK candidates are hydrated")
+}
+
+func TestSearchDropsChunksDeletedDuringHydration(t *testing.T) {
+	store := &fakeStore{}
+	store.addChunk(1, "a.go", []float32{1, 0})
+	store.addChunk(2, "b.go", []float32{0.9, 0.1})
+	delete(store.rows, 2) // deleted between scoring and hydration
 	s, err := New(store, &fakeEmbedder{vec: []float32{1, 0}})
 	require.NoError(t, err)
 
@@ -124,15 +170,13 @@ func TestSearchFusesDenseAndLexical(t *testing.T) {
 	// fusion should surface it. Chunk 99 appears only in lexical and must be
 	// included even with no dense vector.
 	store := &fakeStore{
-		vectors: []core.VecRow{
-			{ChunkID: 1, Path: "a.go", Vector: []float32{1, 0}},
-			{ChunkID: 2, Path: "b.go", Vector: []float32{0.2, 1}},
-		},
 		lexical: []core.Hit{
 			{ChunkID: 2, Path: "b.go", Score: 5},
 			{ChunkID: 99, Path: "z.go", Score: 1},
 		},
 	}
+	store.addChunk(1, "a.go", []float32{1, 0})
+	store.addChunk(2, "b.go", []float32{0.2, 1})
 	s, err := New(store, &fakeEmbedder{vec: []float32{1, 0}})
 	require.NoError(t, err)
 
@@ -151,13 +195,10 @@ func TestSearchFusesDenseAndLexical(t *testing.T) {
 }
 
 func TestSearchRespectsTopN(t *testing.T) {
-	store := &fakeStore{
-		vectors: []core.VecRow{
-			{ChunkID: 1, Vector: []float32{1, 0}},
-			{ChunkID: 2, Vector: []float32{0.9, 0.1}},
-			{ChunkID: 3, Vector: []float32{0.8, 0.2}},
-		},
-	}
+	store := &fakeStore{}
+	store.addChunk(1, "a.go", []float32{1, 0})
+	store.addChunk(2, "b.go", []float32{0.9, 0.1})
+	store.addChunk(3, "c.go", []float32{0.8, 0.2})
 	s, err := New(store, &fakeEmbedder{vec: []float32{1, 0}})
 	require.NoError(t, err)
 
