@@ -99,6 +99,20 @@ export class Repo {
 `,
 			wantSymbols: []string{"User", "ID", "Repo"},
 		},
+		"csharp small file stays one namespace chunk": {
+			path: "Player.cs",
+			src: `using System;
+
+namespace Game
+{
+    public class Player
+    {
+        public void Jump() { }
+    }
+}
+`,
+			wantSymbols: []string{"Game"},
+		},
 	}
 
 	for name, tc := range testCases {
@@ -117,6 +131,123 @@ export class Repo {
 			}
 		})
 	}
+}
+
+func TestCSharpContainerDescent(t *testing.T) {
+	ctx := context.Background()
+	// maxLines small enough that the namespace and class must descend rather
+	// than line-split, but large enough that each method stays one chunk.
+	s := New(WithMaxLines(12), WithOverlap(2))
+
+	src := `using System;
+using System.Collections.Generic;
+
+namespace Game
+{
+    public class Player
+    {
+        private int health;
+        private int stamina;
+
+        public void Jump()
+        {
+            stamina -= 1;
+            Console.WriteLine("jump");
+        }
+
+        public void Attack()
+        {
+            health -= 2;
+            Console.WriteLine("attack");
+        }
+    }
+}
+`
+	chunks, err := s.Chunk(ctx, "Player.cs", []byte(src))
+	require.NoError(t, err)
+
+	got := symbols(chunks)
+	assert.Contains(t, got, "Game", "namespace header chunk")
+	assert.Contains(t, got, "Game.Player", "class header chunk with qualified symbol")
+	assert.Contains(t, got, "Game.Player.Jump", "method chunk with qualified symbol")
+	assert.Contains(t, got, "Game.Player.Attack", "method chunk with qualified symbol")
+
+	for _, c := range chunks {
+		assert.GreaterOrEqual(t, c.StartLine, 1)
+		assert.GreaterOrEqual(t, c.EndLine, c.StartLine)
+	}
+
+	// The two using directives are nameless and merge into one trivial chunk
+	// rather than one chunk per directive.
+	var usings int
+	for _, c := range chunks {
+		if strings.Contains(c.Content, "using System") {
+			usings++
+		}
+	}
+	assert.Equal(t, 1, usings, "using directives should merge into a single chunk")
+}
+
+func TestCSharpPreprocessorRegionDescends(t *testing.T) {
+	ctx := context.Background()
+	s := New(WithMaxLines(8), WithOverlap(2))
+
+	// The #if region is oversized, so it must descend into its member
+	// declarations — with symbols still qualified by the enclosing class —
+	// instead of blind line-splitting.
+	src := `namespace Game
+{
+    public class Tools
+    {
+#if UNITY_EDITOR
+        public void DrawGizmos()
+        {
+            Paint(1);
+            Paint(2);
+        }
+
+        public void Validate()
+        {
+            Check(1);
+            Check(2);
+        }
+#endif
+    }
+}
+`
+	chunks, err := s.Chunk(ctx, "Tools.cs", []byte(src))
+	require.NoError(t, err)
+
+	got := symbols(chunks)
+	assert.Contains(t, got, "Game.Tools.DrawGizmos", "method inside #if keeps its class qualification")
+	assert.Contains(t, got, "Game.Tools.Validate")
+}
+
+func TestCSharpFileScopedNamespaceAndEnum(t *testing.T) {
+	ctx := context.Background()
+	s := New()
+
+	src := `namespace Game.Core;
+
+public interface IDamageable
+{
+    void TakeDamage(int amount);
+}
+
+public enum Rarity
+{
+    Common,
+    Rare,
+    Legendary,
+}
+`
+	chunks, err := s.Chunk(ctx, "Core.cs", []byte(src))
+	require.NoError(t, err)
+
+	got := symbols(chunks)
+	assert.Contains(t, got, "Game.Core", "file-scoped namespace declaration keeps its name")
+	assert.Contains(t, got, "IDamageable")
+	assert.Contains(t, got, "Rarity", "enum stays a single named chunk")
 }
 
 func TestOversizedDeclarationIsSplit(t *testing.T) {

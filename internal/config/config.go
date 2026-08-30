@@ -56,6 +56,12 @@ type Config struct {
 	// pool (one model session per worker), so higher values trade memory for
 	// throughput. Always at least 1.
 	Concurrency int
+
+	// LowPriority, when true (the default), drops the serving process to
+	// below-normal OS scheduling priority so a long index run yields CPU to
+	// interactive applications (e.g. a game editor on the same machine)
+	// instead of crawling the system. Disable with CCG_LOW_PRIORITY=0.
+	LowPriority bool
 }
 
 const (
@@ -71,7 +77,8 @@ const (
 
 // New builds a Config from defaults, applying environment overrides
 // (CCG_INDEX_DIR, CCG_EMBED_PROVIDER, CCG_EMBED_MODEL, CCG_EMBED_DIM,
-// CCG_OLLAMA_HOST), and validates the result.
+// CCG_OLLAMA_HOST, CCG_INDEX_CONCURRENCY, CCG_LOW_PRIORITY), and validates
+// the result.
 func New() (*Config, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -89,6 +96,7 @@ func New() (*Config, error) {
 		ONNXFile:      envOr("CCG_ONNX_FILE", defaultONNXFile),
 		OllamaHost:    envOr("CCG_OLLAMA_HOST", defaultOllamaHost),
 		Concurrency:   defaultConcurrency(),
+		LowPriority:   envOr("CCG_LOW_PRIORITY", "1") != "0",
 	}
 
 	if raw := os.Getenv("CCG_INDEX_CONCURRENCY"); raw != "" {

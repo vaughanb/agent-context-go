@@ -37,14 +37,11 @@ type Hit struct {
 	Score     float64
 }
 
-// VecRow is a stored chunk together with its embedding, used by dense
-// (vector) search to score every chunk against a query.
-type VecRow struct {
-	ChunkID   int64
-	Path      string
-	StartLine int
-	EndLine   int
-	Symbol    string
-	Content   string
-	Vector    []float32
+// EmbRow is a chunk id paired with its embedding — the minimal row dense
+// search needs to score a query against every stored chunk. Full rows for
+// the top-scoring ids are hydrated separately, so brute-force scoring never
+// materializes every chunk's text.
+type EmbRow struct {
+	ChunkID int64
+	Vector  []float32
 }

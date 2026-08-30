@@ -24,6 +24,14 @@ func TestNewDefaults(t *testing.T) {
 	assert.NotEmpty(t, c.IndexDir)
 	assert.NotEmpty(t, c.ModelDir)
 	assert.GreaterOrEqual(t, c.Concurrency, 1, "concurrency defaults to at least 1")
+	assert.True(t, c.LowPriority, "low priority defaults to on")
+}
+
+func TestNewLowPriorityOverride(t *testing.T) {
+	t.Setenv("CCG_LOW_PRIORITY", "0")
+	c, err := New()
+	require.NoError(t, err)
+	assert.False(t, c.LowPriority)
 }
 
 func TestNewConcurrencyOverride(t *testing.T) {

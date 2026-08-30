@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/vaughanb/agent-context-go/internal/core"
 
@@ -32,21 +33,33 @@ var ErrModelMismatch = errors.New("store: embedding model or dimension mismatch"
 // Store is a handle to one codebase's index database. It is safe for
 // concurrent use by multiple goroutines (database/sql pools connections).
 type Store struct {
-	db    *sql.DB
-	model string
-	dim   int
+	db             *sql.DB
+	model          string
+	dim            int
+	chunkerVersion string
+
+	// embMu guards the in-memory embedding cache. The cache holds every
+	// chunk's id and vector so repeated searches avoid re-scanning and
+	// re-decoding the whole chunks table; any write invalidates it.
+	embMu    sync.RWMutex
+	embRows  []core.EmbRow
+	embValid bool
 }
 
 // New opens (creating if needed) the index database at path, applies the
-// schema, and reconciles the embedding model/dimension metadata. If the
-// database already records a different model or dimension, it returns
-// ErrModelMismatch.
-func New(ctx context.Context, path, model string, dim int) (*Store, error) {
+// schema, and reconciles the metadata. If the database already records a
+// different embedding model or dimension, it returns ErrModelMismatch. If it
+// records a different chunkerVersion, every file is marked changed so the
+// next index run re-chunks it — existing chunks stay searchable until then.
+func New(ctx context.Context, path, model string, dim int, chunkerVersion string) (*Store, error) {
 	if model == "" {
 		return nil, fmt.Errorf("store: model must not be empty")
 	}
 	if dim <= 0 {
 		return nil, fmt.Errorf("store: dim must be positive, got %d", dim)
+	}
+	if chunkerVersion == "" {
+		return nil, fmt.Errorf("store: chunker version must not be empty")
 	}
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -62,7 +75,7 @@ func New(ctx context.Context, path, model string, dim int) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite %q: %w", path, err)
 	}
 
-	s := &Store{db: db, model: model, dim: dim}
+	s := &Store{db: db, model: model, dim: dim, chunkerVersion: chunkerVersion}
 	if err := s.init(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -84,14 +97,25 @@ func (s *Store) reconcileMeta(ctx context.Context) error {
 	}
 	if len(existing) == 0 {
 		return s.writeMeta(ctx, map[string]string{
-			"schema_version": schemaVersion,
-			"model":          s.model,
-			"dim":            strconv.Itoa(s.dim),
+			"schema_version":  schemaVersion,
+			"model":           s.model,
+			"dim":             strconv.Itoa(s.dim),
+			"chunker_version": s.chunkerVersion,
 		})
 	}
 	if existing["model"] != s.model || existing["dim"] != strconv.Itoa(s.dim) {
 		return fmt.Errorf("%w: existing model=%q dim=%s, requested model=%q dim=%d",
 			ErrModelMismatch, existing["model"], existing["dim"], s.model, s.dim)
+	}
+	if existing["chunker_version"] != s.chunkerVersion {
+		// The chunking algorithm changed (databases predating the key count as
+		// changed too). Stored chunks remain searchable, but their boundaries
+		// are stale; clearing every content hash marks all files changed so the
+		// next index run re-chunks and re-embeds them.
+		if _, err := s.db.ExecContext(ctx, `UPDATE files SET content_hash = ''`); err != nil {
+			return fmt.Errorf("mark files for re-chunk: %w", err)
+		}
+		return s.writeMeta(ctx, map[string]string{"chunker_version": s.chunkerVersion})
 	}
 	return nil
 }
@@ -209,6 +233,7 @@ func (s *Store) ReplaceChunks(ctx context.Context, fileID int64, meta core.File,
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit replace chunks: %w", err)
 	}
+	s.invalidateEmbeddings()
 	return nil
 }
 
@@ -218,6 +243,7 @@ func (s *Store) DeleteFile(ctx context.Context, path string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path); err != nil {
 		return fmt.Errorf("delete file %q: %w", path, err)
 	}
+	s.invalidateEmbeddings()
 	return nil
 }
 
@@ -244,24 +270,47 @@ func (s *Store) ListPaths(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// AllVectors returns every chunk with a decoded embedding, for brute-force
-// dense (cosine) search. Chunks without an embedding are skipped.
-func (s *Store) AllVectors(ctx context.Context) ([]core.VecRow, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, f.path, c.start_line, c.end_line, c.symbol, c.content, c.embedding
-		 FROM chunks c JOIN files f ON f.id = c.file_id
-		 WHERE c.embedding IS NOT NULL`)
+// AllEmbeddings returns every chunk id with its decoded embedding, for
+// brute-force dense (cosine) scoring. The result is cached in memory and
+// reused until a write (ReplaceChunks, DeleteFile, Clear) invalidates it, so
+// steady-state searches avoid re-scanning and re-decoding every embedding
+// BLOB. Callers must treat the returned slice and its vectors as read-only.
+func (s *Store) AllEmbeddings(ctx context.Context) ([]core.EmbRow, error) {
+	s.embMu.RLock()
+	if s.embValid {
+		rows := s.embRows
+		s.embMu.RUnlock()
+		return rows, nil
+	}
+	s.embMu.RUnlock()
+
+	s.embMu.Lock()
+	defer s.embMu.Unlock()
+	if s.embValid {
+		return s.embRows, nil
+	}
+	rows, err := s.loadEmbeddings(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query vectors: %w", err)
+		return nil, err
+	}
+	s.embRows, s.embValid = rows, true
+	return rows, nil
+}
+
+func (s *Store) loadEmbeddings(ctx context.Context) ([]core.EmbRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("query embeddings: %w", err)
 	}
 	defer rows.Close()
 
-	var out []core.VecRow
+	var out []core.EmbRow
 	for rows.Next() {
-		var r core.VecRow
+		var r core.EmbRow
 		var blob []byte
-		if err := rows.Scan(&r.ChunkID, &r.Path, &r.StartLine, &r.EndLine, &r.Symbol, &r.Content, &blob); err != nil {
-			return nil, fmt.Errorf("scan vector row: %w", err)
+		if err := rows.Scan(&r.ChunkID, &blob); err != nil {
+			return nil, fmt.Errorf("scan embedding row: %w", err)
 		}
 		vec, err := decodeVec(blob)
 		if err != nil {
@@ -271,7 +320,52 @@ func (s *Store) AllVectors(ctx context.Context) ([]core.VecRow, error) {
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate vectors: %w", err)
+		return nil, fmt.Errorf("iterate embeddings: %w", err)
+	}
+	return out, nil
+}
+
+// invalidateEmbeddings drops the embedding cache so the next AllEmbeddings
+// reloads from the database. Called after every write that touches chunks.
+func (s *Store) invalidateEmbeddings() {
+	s.embMu.Lock()
+	s.embRows, s.embValid = nil, false
+	s.embMu.Unlock()
+}
+
+// ChunksByIDs returns the full stored rows for the given chunk ids, keyed by
+// id; ids not present in the index are simply absent from the result. Dense
+// search scores against the lean embedding cache and hydrates only its top
+// candidates through this method.
+func (s *Store) ChunksByIDs(ctx context.Context, ids []int64) (map[int64]core.Hit, error) {
+	out := make(map[int64]core.Hit, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT c.id, f.path, c.start_line, c.end_line, c.symbol, c.content
+		 FROM chunks c JOIN files f ON f.id = c.file_id
+		 WHERE c.id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query chunks by id: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var h core.Hit
+		if err := rows.Scan(&h.ChunkID, &h.Path, &h.StartLine, &h.EndLine, &h.Symbol, &h.Content); err != nil {
+			return nil, fmt.Errorf("scan chunk row: %w", err)
+		}
+		out[h.ChunkID] = h
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate chunk rows: %w", err)
 	}
 	return out, nil
 }
@@ -324,6 +418,7 @@ func (s *Store) Clear(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`); err != nil {
 		return fmt.Errorf("rebuild fts: %w", err)
 	}
+	s.invalidateEmbeddings()
 	return nil
 }
 
@@ -338,7 +433,9 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // buildFTSQuery turns arbitrary user text into a safe FTS5 MATCH expression:
 // each alphanumeric token is quoted (so punctuation and FTS operators cannot
-// break the query or be interpreted) and tokens are OR-ed together.
+// break the query or be interpreted), marked as a prefix (code identifiers
+// are compound — "damage" should match "damageAmount"), and tokens are OR-ed
+// together.
 func buildFTSQuery(query string) string {
 	fields := strings.FieldsFunc(query, func(r rune) bool {
 		return !(r == '_' ||
@@ -348,7 +445,7 @@ func buildFTSQuery(query string) string {
 	})
 	quoted := make([]string, 0, len(fields))
 	for _, f := range fields {
-		quoted = append(quoted, `"`+f+`"`)
+		quoted = append(quoted, `"`+f+`"*`)
 	}
 	return strings.Join(quoted, " OR ")
 }

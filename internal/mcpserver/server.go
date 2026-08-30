@@ -22,9 +22,14 @@ import (
 	"github.com/vaughanb/agent-context-go/internal/store"
 )
 
-// Chunker is the chunking dependency the indexer needs. It is injected so this
-// package never imports the CGO tree-sitter implementation directly.
-type Chunker = indexer.Chunker
+// Chunker is the chunking dependency the indexer needs, plus the algorithm
+// version the store records per index so a chunker upgrade re-chunks existing
+// indexes. It is injected so this package never imports the CGO tree-sitter
+// implementation directly.
+type Chunker interface {
+	indexer.Chunker
+	Version() string
+}
 
 // serverName and serverVersion identify this server to MCP clients.
 const (
@@ -132,7 +137,7 @@ func (s *Server) handleFor(ctx context.Context, path string) (*handle, string, e
 		return h, absRoot, nil
 	}
 
-	st, err := store.New(ctx, s.cfg.DBPath(absRoot), s.embedder.Model(), s.embedder.Dim())
+	st, err := store.New(ctx, s.cfg.DBPath(absRoot), s.embedder.Model(), s.embedder.Dim(), s.chunker.Version())
 	if err != nil {
 		return nil, absRoot, fmt.Errorf("open index for %q: %w", absRoot, err)
 	}

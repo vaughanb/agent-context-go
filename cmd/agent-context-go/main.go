@@ -68,6 +68,14 @@ func serve() error {
 		return err
 	}
 
+	if cfg.LowPriority {
+		if err := lowerProcessPriority(); err != nil {
+			log.Printf("keeping normal process priority (lowering failed: %v)", err)
+		} else {
+			log.Print("running at below-normal process priority so indexing stays in the background (CCG_LOW_PRIORITY=0 to disable)")
+		}
+	}
+
 	log.Printf("loading embedding model %q (provider %s, %d parallel); first run may download it…",
 		cfg.EmbedModel, cfg.EmbedProvider, cfg.Concurrency)
 	embedder, err := embed.NewPool(ctx, cfg, cfg.Concurrency)
